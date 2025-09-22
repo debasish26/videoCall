@@ -1,9 +1,0 @@
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/AudioSendThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/ControlReceiveThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/CliCommandThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/Main.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/VideoSendThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/PerformanceLogger.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/AudioReceiveThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/VideoReceiveThread.java
-/home/queue/Documents/Github/p2p_cp/p2p/src/main/java/com/p2p/app/Constants.java
