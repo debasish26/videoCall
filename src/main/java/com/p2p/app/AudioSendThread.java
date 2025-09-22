@@ -18,7 +18,7 @@ public class AudioSendThread extends Thread {
     private TargetDataLine targetDataLine;
     private DatagramSocket udpSocket;
     private final AtomicBoolean running = new AtomicBoolean(true);
-    private final AtomicBoolean muted = new AtomicBoolean(false);
+    private final AtomicBoolean muted = new AtomicBoolean(true); // Start muted to prevent feedback
     private ArrayBlockingQueue<byte[]> audioQueue;
     private long packetCount = 0;
 
@@ -46,6 +46,10 @@ public class AudioSendThread extends Thread {
             udpSocket = new DatagramSocket();
             udpSocket.setSendBufferSize(Constants.AUDIO_BUFFER_SIZE * 4);
             System.out.println("AudioSendThread: UDP socket created for audio streaming to " + remoteIp + ":" + remoteAudioPort);
+            
+            // Wait a moment and check if this is a test scenario
+            System.out.println("AudioSendThread: Starting MUTED to prevent feedback. Use /mute to unmute when client connects.");
+            Thread.sleep(1000);
 
             DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
             if (!AudioSystem.isLineSupported(info)) {

@@ -80,9 +80,11 @@ public class CliCommandThread extends Thread {
     @Override
     public void run() {
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        System.out.println("\n=== CLI Commands Available ===\n/mute - Toggle audio mute/unmute\n/pause - Toggle video pause/resume\n/end - End the call\n==============================");
         try {
             while (running.get()) {
-                System.out.print("Enter command (/mute, /pause, /end): ");
+                System.out.print("\n> Enter command: ");
+                System.out.flush(); // Ensure prompt is shown
                 String command = reader.readLine();
 
                 if (command == null) {
@@ -105,27 +107,27 @@ public class CliCommandThread extends Thread {
                     case "/mute":
                         if (audioSendThread != null) {
                             audioSendThread.toggleMute();
-                            System.out.println("Local audio " + (audioSendThread.isMuted() ? "muted." : "unmuted."));
+                            System.out.println("✓ Local audio " + (audioSendThread.isMuted() ? "MUTED" : "UNMUTED"));
                         } else {
-                            System.out.println("Audio sending not active.");
+                            System.out.println("⚠ Audio sending not active.");
                         }
                         break;
                     case "/pause":
                         if (videoSendThread != null) {
                             videoSendThread.togglePause();
-                            System.out.println("Local video " + (videoSendThread.isPaused() ? "paused." : "resumed."));
+                            System.out.println("✓ Local video " + (videoSendThread.isPaused() ? "PAUSED" : "RESUMED"));
                         } else {
-                            System.out.println("Video sending not active.");
+                            System.out.println("⚠ Video sending not active.");
                         }
                         break;
                     case "/end":
-                        System.out.println("Ending call...");
+                        System.out.println("✓ Ending call...");
                         if (writer != null) writer.println("/end"); // Notify remote even if not connected for other commands
                         shutdownHook.run();
                         running.set(false);
                         break;
                     default:
-                        System.out.println("Unknown command: " + command);
+                        System.out.println("❌ Unknown command: " + command + ". Use /mute, /pause, or /end");
                 }
             }
         } catch (IOException e) {
