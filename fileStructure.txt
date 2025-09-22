@@ -1,0 +1,456 @@
+# Project File Structure and Explanation
+
+## Project Root
+
+- `pom.xml`: This is our Maven project configuration file. Think of it as the blueprint for building our Java application. It tells Maven (our build tool) about our project's name, version, and, most importantly, all the external libraries (dependencies) we need, like JavaCV for video processing. It also defines how to package our application into a runnable JAR file.
+
+- `README.md`: This file, as you know, provides a quick overview of the project, including instructions on how to build and run the application, the CLI commands, and a note about the auto-reconnect feature. It's our user manual.
+
+## `src/main/java/com/p2p/app/` Directory
+
+This directory contains all our Java source code, organized into separate files, each handling a specific part of the application.
+
+---
+
+### `Constants.java`
+
+**Purpose**: This file acts as a central repository for all our application's fixed settings and configurations. Instead of hardcoding values directly into our logic, we define them here as constants, making it easy to change things like port numbers, video resolution, or audio quality from a single place.
+
+**Important Code & Logic**:
+```java
+5:20:src/main/java/com/p2p/app/Constants.java
+public class Constants {
+    // Port Numbers
+    public static final int VIDEO_UDP_PORT = 6000;
+    public static final int AUDIO_TCP_PORT = 6001;
+    public static final int CONTROL_TCP_PORT = 6002;
+
+    // Video Settings
+    public static final int FRAME_WIDTH = 320;
+    public static final int FRAME_HEIGHT = 240;
+    public static final int FRAME_RATE = 15;
+    public static final double JPEG_QUALITY = 0.5; // ~0.5 as requested
+    public static final int MAX_VIDEO_PACKET_SIZE = 60 * 1024; // 60 KB
+
+    // Audio Settings
+    public static final float AUDIO_SAMPLE_RATE = 16000; // 16kHz
+    public static final int AUDIO_SAMPLE_SIZE_IN_BITS = 16;
+    public static final int AUDIO_CHANNELS = 1; // Mono
+    public static final boolean AUDIO_SIGNED = true;
+    public static final boolean AUDIO_BIG_ENDIAN = false;
+}
+```
+**Logic Explained**: Each `public static final` variable here is a constant. For example, `VIDEO_UDP_PORT = 6000` means that our video data will always be sent and received on UDP port 6000. `FRAME_WIDTH` and `FRAME_HEIGHT` define the video resolution. These are used throughout the application to ensure consistency.
+
+---
+
+### `Main.java`
+
+**Purpose**: This is the heart of our application – the entry point where everything starts. It parses command-line arguments (whether we're running in "server" or "client" mode), initializes all the different communication threads (for video, audio, and control), and manages their graceful shutdown when the application exits.
+
+**Important Code & Logic**:
+```java
+11:32:src/main/java/com/p2p/app/Main.java
+    public static void main(String[] args) {
+        if (args.length < 1) {
+            System.out.println("Usage: java -jar call.jar [server|client] <ip-address>");
+            return;
+        }
+
+        String mode = args[0];
+        String remoteIp = null;
+
+        if ("client".equalsIgnoreCase(mode)) {
+            if (args.length < 2) {
+                System.out.println("Usage: java -jar call.jar client <server-ip>");
+                return;
+            }
+            remoteIp = args[1];
+        } else if (!"server".equalsIgnoreCase(mode)) {
+            System.out.println("Invalid mode. Use 'server' or 'client'.");
+            return;
+        }
+
+        // Add shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread(Main::shutdown));
+
+        if ("server".equalsIgnoreCase(mode)) {
+            System.out.println("Starting in Server mode...");
+            startServer(args[1]); // Server also needs a remote IP for sending
+        } else {
+            System.out.println("Starting in Client mode, connecting to " + remoteIp + "...");
+            startClient(remoteIp);
+        }
+    }
+```
+**Logic Explained**: The `main` method is the first code that runs. It checks if you provided "server" or "client" and the necessary IP address. If you say "server," it calls `startServer`. If you say "client," it calls `startClient`. The `Runtime.getRuntime().addShutdownHook` part is crucial: it registers a piece of code (`Main::shutdown`) to run automatically when the application is about to close, ensuring all connections are properly shut down.
+
+```java
+97:118:src/main/java/com/p2p/app/Main.java
+    private static void shutdown() {
+        System.out.println("Shutting down application...");
+
+        if (cliCommandThread != null) cliCommandThread.stopCli();
+        if (videoSendThread != null) videoSendThread.stopCapture();
+        if (videoReceiveThread != null) videoReceiveThread.stopReception();
+        if (audioSendThread != null) audioSendThread.stopCapture();
+        if (audioReceiveThread != null) audioReceiveThread.stopReception();
+        if (controlReceiveThread != null) controlReceiveThread.stopReception();
+
+        executorService.shutdownNow(); // Immediately shut down all running tasks
+        System.out.println("Application shutdown complete.");
+    }
+```
+**Logic Explained**: The `shutdown` method is called when the application needs to exit gracefully (e.g., when you type `/end`). It ensures that all active threads (like video sending, audio receiving, etc.) are stopped in an orderly fashion, and all network connections are closed, preventing resources from being left open.
+
+---
+
+### `VideoSendThread.java`
+
+**Purpose**: This thread is responsible for capturing video from your webcam, compressing it, and sending it over the network to the other peer. It also displays your local video in a separate window.
+
+**Important Code & Logic**:
+```java
+30:72:src/main/java/com/p2p/app/VideoSendThread.java
+    @Override
+    public void run() {
+        try {
+            udpSocket = new DatagramSocket();
+            grabber = new OpenCVFrameGrabber(0); // 0 for default webcam
+            grabber.setImageWidth(Constants.FRAME_WIDTH);
+            grabber.setImageHeight(Constants.FRAME_HEIGHT);
+            grabber.setFrameRate(Constants.FRAME_RATE);
+            grabber.start();
+
+            converter = new OpenCVFrameConverter.ToMat();
+
+            localVideoFrame = new CanvasFrame("Local Video", CanvasFrame.getDefaultGamma() / grabber.getGamma());
+            localVideoFrame.setDefaultCloseOperation(javax.swing.JFrame.EXIT_ON_CLOSE);
+            localVideoFrame.setCanvasSize(Constants.FRAME_WIDTH, Constants.FRAME_HEIGHT);
+
+            long lastFrameTime = System.currentTimeMillis();
+            long frameDurationMillis = 1000 / Constants.FRAME_RATE;
+
+            while (running.get()) {
+                if (paused.get()) {
+                    Thread.sleep(100); // Sleep briefly if paused
+                    continue;
+                }
+
+                long now = System.currentTimeMillis();
+                if (now - lastFrameTime < frameDurationMillis) {
+                    Thread.sleep(frameDurationMillis - (now - lastFrameTime));
+                }
+                lastFrameTime = System.currentTimeMillis();
+
+                Frame frame = grabber.grab();
+                if (frame != null) {
+                    localVideoFrame.showImage(frame);
+
+                    Mat mat = converter.convert(frame);
+                    if (mat != null) {
+                        // Compress to JPEG
+                        org.bytedeco.opencv.opencv_core.IntPointer quality = new org.bytedeco.opencv.opencv_core.IntPointer(IMWRITE_JPEG_QUALITY, (int) (Constants.JPEG_QUALITY * 100));
+                        byte[] jpegData = new byte[0];
+                        try (org.bytedeco.javacpp.BytePointer outputBuffer = new org.bytedeco.javacpp.BytePointer(mat.total() * mat.elemSize())) {
+                            opencv_imgcodecs.imencode(".jpg", mat, outputBuffer, quality);
+                            jpegData = new byte[(int) outputBuffer.limit()];
+                            outputBuffer.get(jpegData);
+                        }
+
+                        // Skip frame if too large
+                        if (jpegData.length > Constants.MAX_VIDEO_PACKET_SIZE) {
+                            System.out.println("Skipping video frame: " + jpegData.length + " bytes (exceeds " + Constants.MAX_VIDEO_PACKET_SIZE + " bytes)");
+                            continue;
+                        }
+
+                        // Send via UDP
+                        DatagramPacket packet = new DatagramPacket(jpegData, jpegData.length, InetAddress.getByName(remoteIp), Constants.VIDEO_UDP_PORT);
+                        udpSocket.send(packet);
+                    }
+                }
+            }
+```
+**Logic Explained**: The `run` method is where the video sending magic happens. It continuously:
+1.  **Captures**: Uses `OpenCVFrameGrabber` to get a frame from the webcam.
+2.  **Displays Local Video**: Shows the captured frame in a `CanvasFrame` titled "Local Video."
+3.  **Compresses**: Converts the video frame into a `Mat` object (OpenCV's image representation) and then compresses it into JPEG data using `opencv_imgcodecs.imencode`.
+4.  **Checks Size**: If the compressed JPEG data is too large (exceeds `MAX_VIDEO_PACKET_SIZE`, which is 60KB), it skips sending that frame to avoid network fragmentation issues.
+5.  **Sends**: Packages the JPEG data into a `DatagramPacket` and sends it over UDP to the `remoteIp` on `VIDEO_UDP_PORT`. UDP is used for video because it's faster and tolerant of occasional lost packets, which is fine for video.
+6.  **FPS Limiter**: Includes logic to pause briefly if frames are being captured too quickly, ensuring we stick to the `FRAME_RATE` (15 FPS).
+
+---
+
+### `VideoReceiveThread.java`
+
+**Purpose**: This thread is dedicated to receiving video data sent over UDP from the other peer, decompressing it, and displaying it in a separate window.
+
+**Important Code & Logic**:
+```java
+22:42:src/main/java/com/p2p/app/VideoReceiveThread.java
+    @Override
+    public void run() {
+        try {
+            udpSocket = new DatagramSocket(Constants.VIDEO_UDP_PORT);
+            byte[] buffer = new byte[Constants.MAX_VIDEO_PACKET_SIZE];
+
+            remoteVideoFrame = new CanvasFrame("Remote Video");
+            remoteVideoFrame.setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
+            remoteVideoFrame.setCanvasSize(Constants.FRAME_WIDTH, Constants.FRAME_HEIGHT);
+
+            converter = new OpenCVFrameConverter.ToMat();
+
+            while (running.get()) {
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                udpSocket.receive(packet);
+
+                byte[] jpegData = new byte[packet.getLength()];
+                System.arraycopy(packet.getData(), 0, jpegData, 0, packet.getLength());
+
+                Mat mat = opencv_imgcodecs.imdecode(new org.bytedeco.javacpp.BytePointer(jpegData), opencv_imgcodecs.IMREAD_COLOR);
+                if (mat != null) {
+                    Frame frame = converter.convert(mat);
+                    remoteVideoFrame.showImage(frame);
+                    mat.release(); // Release native memory
+                }
+            }
+```
+**Logic Explained**: The `run` method continuously:
+1.  **Listens**: Sets up a `DatagramSocket` to listen for incoming UDP packets on `VIDEO_UDP_PORT`.
+2.  **Receives**: Waits to receive a `DatagramPacket` containing JPEG video data.
+3.  **Decompresses**: Extracts the JPEG data from the packet and uses `opencv_imgcodecs.imdecode` to decompress it back into a `Mat` object.
+4.  **Displays Remote Video**: Converts the `Mat` to a `Frame` and displays it in a `CanvasFrame` titled "Remote Video." It also releases native memory used by `Mat` to prevent leaks.
+
+---
+
+### `AudioSendThread.java`
+
+**Purpose**: This thread captures audio from your microphone and streams it as raw PCM data over a TCP connection to the other peer. It also handles muting and unmuting your outgoing audio.
+
+**Important Code & Logic**:
+```java
+21:52:src/main/java/com/p2p/app/AudioSendThread.java
+    @Override
+    public void run() {
+        AudioFormat format = new AudioFormat(
+                Constants.AUDIO_SAMPLE_RATE,
+                Constants.AUDIO_SAMPLE_SIZE_IN_BITS,
+                Constants.AUDIO_CHANNELS,
+                Constants.AUDIO_SIGNED,
+                Constants.AUDIO_BIG_ENDIAN
+        );
+
+        try {
+            DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+            if (!AudioSystem.isLineSupported(info)) {
+                System.err.println("Audio line not supported.");
+                running.set(false);
+                return;
+            }
+            targetDataLine = (TargetDataLine) AudioSystem.getLine(info);
+            targetDataLine.open(format);
+            targetDataLine.start();
+
+            tcpSocket = new Socket(remoteIp, Constants.AUDIO_TCP_PORT);
+            outputStream = tcpSocket.getOutputStream();
+
+            byte[] buffer = new byte[targetDataLine.getBufferSize() / 5]; // Smaller buffer for more frequent sending
+
+            while (running.get()) {
+                if (!muted.get()) {
+                    try {
+                        int bytesRead = targetDataLine.read(buffer, 0, buffer.length);
+                        if (bytesRead > 0) {
+                            outputStream.write(buffer, 0, bytesRead);
+                        }
+                    } catch (java.io.IOException e) {
+                        System.err.println("AudioSendThread: Connection dropped. Attempting to reconnect...");
+                        reconnect();
+                    }
+                } else {
+                    Thread.sleep(100); // Sleep briefly if muted
+                }
+            }
+```
+**Logic Explained**: In its `run` method:
+1.  **Audio Setup**: It configures the desired audio format (e.g., 16kHz sample rate, mono, 16-bit PCM).
+2.  **Capture**: It obtains a `TargetDataLine` (Java Sound API's way to capture audio from a microphone), opens it, and starts capturing audio.
+3.  **Connects**: Establishes a TCP connection to the `remoteIp` on `AUDIO_TCP_PORT`. TCP is used for audio to ensure all data arrives reliably and in order, which is critical for good sound quality.
+4.  **Streams**: Continuously reads raw audio data from the microphone into a buffer and writes these "chunks" to the TCP `outputStream`.
+5.  **Mute Logic**: If the audio is "muted" (controlled by the `/mute` command), it pauses sending audio data.
+6.  **Auto-reconnect**: If the TCP connection drops (`java.io.IOException`), it calls a `reconnect()` method to try and re-establish the connection, making the audio more resilient to network glitches.
+
+---
+
+### `AudioReceiveThread.java`
+
+**Purpose**: This thread listens for incoming raw PCM audio data over TCP, receives it, and plays it back through your speakers.
+
+**Important Code & Logic**:
+```java
+21:53:src/main/java/com/p2p/app/AudioReceiveThread.java
+    @Override
+    public void run() {
+        AudioFormat format = new AudioFormat(
+                Constants.AUDIO_SAMPLE_RATE,
+                Constants.AUDIO_SAMPLE_SIZE_IN_BITS,
+                Constants.AUDIO_CHANNels,
+                Constants.AUDIO_SIGNED,
+                Constants.AUDIO_BIG_ENDIAN
+        );
+
+        try {
+            DataLine.Info info = new DataLine.Info(SourceDataLine.class, format);
+            if (!AudioSystem.isLineSupported(info)) {
+                System.err.println("Audio playback line not supported.");
+                running.set(false);
+                return;
+            }
+            sourceDataLine = (SourceDataLine) AudioSystem.getLine(info);
+            sourceDataLine.open(format);
+            sourceDataLine.start();
+
+            serverSocket = new ServerSocket(Constants.AUDIO_TCP_PORT);
+            System.out.println("AudioReceiveThread: Waiting for audio connection on port " + Constants.AUDIO_TCP_PORT + "...");
+            clientSocket = serverSocket.accept();
+            System.out.println("AudioReceiveThread: Audio client connected from " + clientSocket.getInetAddress());
+            inputStream = clientSocket.getInputStream();
+
+            byte[] buffer = new byte[sourceDataLine.getBufferSize() / 5]; // Match send buffer size
+            int bytesRead;
+
+            while (running.get()) {
+                try {
+                    if ((bytesRead = inputStream.read(buffer)) != -1) {
+                        if (bytesRead > 0) {
+                            sourceDataLine.write(buffer, 0, bytesRead);
+                        }
+                    } else {
+                        // Stream closed, remote end disconnected
+                        System.err.println("AudioReceiveThread: Connection closed by remote. Attempting to re-accept...");
+                        reconnect();
+                    }
+                } catch (java.io.IOException e) {
+                    System.err.println("AudioReceiveThread: Connection dropped. Attempting to re-accept...");
+                    reconnect();
+                }
+            }
+```
+**Logic Explained**: The `run` method handles incoming audio:
+1.  **Audio Setup**: Configures the audio format for playback, matching the sending format.
+2.  **Playback**: Gets a `SourceDataLine` (Java Sound API's way to play audio), opens it, and prepares for playback.
+3.  **Listens & Accepts**: On the server side, it creates a `ServerSocket` to listen for incoming TCP connections on `AUDIO_TCP_PORT`. Once a client connects, it accepts the connection and gets an `inputStream` to read data from the client.
+4.  **Plays**: Continuously reads audio data (PCM chunks) from the `inputStream` and writes them to the `sourceDataLine` for playback.
+5.  **Auto-reconnect**: If the TCP connection drops or the remote end disconnects, it calls `reconnect()` to wait for and accept a new connection, ensuring audio playback can resume.
+
+---
+
+### `CliCommandThread.java`
+
+**Purpose**: This thread is responsible for reading commands you type in your terminal (like `/mute`, `/pause`, `/end`), processing them, and then sending these commands to the other peer's control port. It acts as your control interface.
+
+**Important Code & Logic**:
+```java
+61:107:src/main/java/com/p2p/app/CliCommandThread.java
+    @Override
+    public void run() {
+        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        try {
+            while (running.get()) {
+                System.out.print("Enter command (/mute, /pause, /end): ");
+                String command = reader.readLine();
+
+                if (command == null) {
+                    System.out.println("CLI input stream closed. Initiating shutdown.");
+                    shutdownHook.run();
+                    break;
+                }
+
+                // Send command to remote peer if connected and not an /end command
+                if (writer != null && controlSocket != null && controlSocket.isConnected() && !command.trim().toLowerCase().equals("/end")) {
+                    try {
+                        writer.println(command);
+                    } catch (Exception e) {
+                        System.err.println("Error sending command to remote: " + e.getMessage());
+                        // Reconnect on send failure
+                        if (isClient) {
+                            tryConnectControl(controlSocket.getInetAddress().getHostAddress(), Constants.CONTROL_TCP_PORT);
+                        } else {
+                            tryAcceptControl();
+                        }
+                    }
+                }
+
+                switch (command.trim().toLowerCase()) {
+                    case "/mute":
+                        if (audioSendThread != null) {
+                            audioSendThread.toggleMute();
+                        }
+                        break;
+                    case "/pause":
+                        if (videoSendThread != null) {
+                            videoSendThread.togglePause();
+                        }
+                        break;
+                    case "/end":
+                        System.out.println("Ending call...");
+                        if (writer != null) writer.println("/end"); // Notify remote even if not connected for other commands
+                        shutdownHook.run();
+                        running.set(false);
+                        break;
+                    default:
+                        System.out.println("Unknown command: " + command);
+                }
+            }
+```
+**Logic Explained**: The `run` method is a loop that:
+1.  **Reads Input**: Waits for you to type a command in the terminal using `reader.readLine()`.
+2.  **Sends Remote Commands**: If a control connection (`controlSocket`) exists and the command isn't `/end`, it sends your command to the other peer's `ControlReceiveThread` via a `PrintWriter`. This allows one peer to control the other's mute/pause status. It also includes auto-reconnect if sending fails.
+3.  **Local Command Handling**: Uses a `switch` statement to check your command:
+    *   `/mute`: Calls `audioSendThread.toggleMute()` to locally mute/unmute your microphone.
+    *   `/pause`: Calls `videoSendThread.togglePause()` to locally pause/unpause your webcam.
+    *   `/end`: Prints a message, sends `/end` to the remote peer, and then triggers the overall application shutdown.
+
+---
+
+### `ControlReceiveThread.java`
+
+**Purpose**: This thread acts as a dedicated listener for incoming control commands (like remote `/mute`, `/pause`, or `/end`) from the other peer. When a command is received, it tells the `CliCommandThread` to process it locally.
+
+**Important Code & Logic**:
+```java
+20:53:src/main/java/com/p2p/app/ControlReceiveThread.java
+    @Override
+    public void run() {
+        try {
+            serverSocket = new ServerSocket(listenPort); // Use the provided listenPort
+            System.out.println("ControlReceiveThread: Waiting for control connection on port " + listenPort + "...");
+            clientSocket = serverSocket.accept();
+            System.out.println("ControlReceiveThread: Control client connected from " + clientSocket.getInetAddress());
+            reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+
+            String line;
+            while (running.get()) {
+                try {
+                    if ((line = reader.readLine()) != null) {
+                        cliCommandThread.processRemoteCommand(line);
+                    } else {
+                        // Stream closed, remote end disconnected
+                        System.err.println("ControlReceiveThread: Connection closed by remote. Attempting to re-accept...");
+                        reconnect();
+                    }
+                } catch (java.io.IOException e) {
+                    System.err.println("ControlReceiveThread: Connection dropped. Attempting to re-accept...");
+                    reconnect();
+                }
+            }
+```
+**Logic Explained**: The `run` method continuously:
+1.  **Listens & Accepts**: Creates a `ServerSocket` to listen for incoming TCP connections on a specified `listenPort` (which is `CONTROL_TCP_PORT` for the server, and `CONTROL_TCP_PORT + 1` for the client to allow bidirectional control). Once a connection is made, it gets a `BufferedReader` to read incoming commands.
+2.  **Receives Commands**: Reads lines from the incoming stream. Each line is expected to be a command (e.g., "/mute").
+3.  **Processes Commands**: Passes the received command to the `cliCommandThread.processRemoteCommand()` method. This ensures that a remote peer's command (like muting their audio) is reflected and acted upon locally.
+4.  **Auto-reconnect**: If the TCP control connection drops, it attempts to `reconnect()` by waiting for and accepting a new connection from the remote peer.
+
+---
+
+This covers the main files and their roles in our peer-to-peer video calling application! Each thread works independently but cooperates to provide the full calling experience.
