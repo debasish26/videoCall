@@ -4,35 +4,29 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
-import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class CliCommandThread extends Thread {
     private VideoSendThread videoSendThread;
-    private AudioSendThread audioSendThread;
+    private AudioManager audioManager;
     private Runnable shutdownHook;
     private Socket controlSocket;
     private PrintWriter writer;
     private AtomicBoolean running = new AtomicBoolean(true);
-    private final boolean isClient;
-    private ServerSocket controlServerSocket = null; // Only for server mode
-    private String remoteIp; // Added for client-side control connection
+    private String remoteIp;
+    private int remoteControlPort;
 
-    public CliCommandThread(VideoSendThread videoSendThread, AudioSendThread audioSendThread, Runnable shutdownHook, String remoteIp, ServerSocket controlServerSocket) {
+    public CliCommandThread(VideoSendThread videoSendThread, AudioManager audioManager, Runnable shutdownHook, String remoteIp, int remoteControlPort) {
         this.videoSendThread = videoSendThread;
-        this.audioSendThread = audioSendThread;
+        this.audioManager = audioManager;
         this.shutdownHook = shutdownHook;
         this.remoteIp = remoteIp;
-        this.controlServerSocket = controlServerSocket;
-
-        if (controlServerSocket != null) {
-            this.isClient = false;
-            tryAcceptControl();
-        } else {
-            this.isClient = true;
-            tryConnectControl(remoteIp, Constants.CONTROL_TCP_PORT);
-        }
+        this.remoteControlPort = remoteControlPort;
+        // Start connection attempts in the background so the CLI prompt appears immediately
+        Thread connector = new Thread(() -> tryConnectControl(remoteIp, remoteControlPort), "CliControlConnector");
+        connector.setDaemon(true);
+        connector.start();
     }
 
     private void tryConnectControl(String remoteIp, int port) {
@@ -56,31 +50,12 @@ public class CliCommandThread extends Thread {
         }
     }
 
-    private void tryAcceptControl() {
-        while (running.get()) {
-            try {
-                System.out.println("CliCommandThread: Waiting for control connection on port " + controlServerSocket.getLocalPort() + "...");
-                controlSocket = controlServerSocket.accept();
-                writer = new PrintWriter(controlSocket.getOutputStream(), true);
-                System.out.println("CliCommandThread: Control client connected from " + controlSocket.getInetAddress());
-                break;
-            } catch (Exception e) {
-                System.err.println("CliCommandThread: Error accepting control connection: " + e.getMessage() + ". Retrying in 2 seconds...");
-                try {
-                    Thread.sleep(2000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    running.set(false);
-                    break;
-                }
-            }
-        }
-    }
+    // accept logic removed; CLI only initiates outgoing control connection
 
     @Override
     public void run() {
         BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        System.out.println("\n=== CLI Commands Available ===\n/mute - Toggle audio mute/unmute\n/pause - Toggle video pause/resume\n/end - End the call\n==============================");
+        System.out.println("\n=== CLI Commands Available ===\n/audio - Enable/disable audio system\n/mute  - Toggle audio mute/unmute\n/pause - Toggle video pause/resume\n/end   - End the call\n==============================");
         try {
             while (running.get()) {
                 System.out.print("\n> Enter command: ");
@@ -105,11 +80,15 @@ public class CliCommandThread extends Thread {
 
                 switch (command.trim().toLowerCase()) {
                     case "/mute":
-                        if (audioSendThread != null) {
-                            audioSendThread.toggleMute();
-                            System.out.println("✓ Local audio " + (audioSendThread.isMuted() ? "MUTED" : "UNMUTED"));
+                        if (audioManager != null) {
+                            if (!audioManager.isEnabled()) {
+                                System.out.println("⚠ Audio is disabled. Use /audio to enable first.");
+                            } else {
+                                audioManager.toggleMute();
+                                System.out.println("✓ Local audio " + (audioManager.isMuted() ? "MUTED" : "UNMUTED"));
+                            }
                         } else {
-                            System.out.println("⚠ Audio sending not active.");
+                            System.out.println("⚠ Audio manager not initialized.");
                         }
                         break;
                     case "/pause":
@@ -120,6 +99,17 @@ public class CliCommandThread extends Thread {
                             System.out.println("⚠ Video sending not active.");
                         }
                         break;
+                    case "/audio":
+                        if (audioManager != null) {
+                            if (!audioManager.isEnabled()) {
+                                audioManager.enableAudio();
+                            } else {
+                                audioManager.disableAudio();
+                            }
+                        } else {
+                            System.out.println("⚠ Audio manager not initialized.");
+                        }
+                        break;
                     case "/end":
                         System.out.println("✓ Ending call...");
                         if (writer != null) writer.println("/end"); // Notify remote even if not connected for other commands
@@ -127,7 +117,7 @@ public class CliCommandThread extends Thread {
                         running.set(false);
                         break;
                     default:
-                        System.out.println("❌ Unknown command: " + command + ". Use /mute, /pause, or /end");
+                        System.out.println("❌ Unknown command: " + command + ". Use /audio, /mute, /pause, or /end");
                 }
             }
         } catch (IOException e) {
@@ -140,11 +130,15 @@ public class CliCommandThread extends Thread {
     public void processRemoteCommand(String command) {
         switch (command.trim().toLowerCase()) {
             case "/mute":
-                if (audioSendThread != null) {
-                    audioSendThread.toggleMute();
-                    System.out.println("Remote peer toggled audio " + (audioSendThread.isMuted() ? "MUTE" : "UNMUTE"));
+                if (audioManager != null) {
+                    if (!audioManager.isEnabled()) {
+                        System.out.println("Received remote MUTE command, but audio is disabled locally. Use /audio to enable.");
+                    } else {
+                        audioManager.toggleMute();
+                        System.out.println("Remote peer toggled audio " + (audioManager.isMuted() ? "MUTE" : "UNMUTE"));
+                    }
                 } else {
-                    System.out.println("Received remote MUTE command, but audio sending is not active locally.");
+                    System.out.println("Received remote MUTE command, but audio manager is not initialized.");
                 }
                 break;
             case "/pause":
@@ -153,6 +147,19 @@ public class CliCommandThread extends Thread {
                     System.out.println("Remote peer toggled video " + (videoSendThread.isPaused() ? "PAUSE" : "RESUME"));
                 } else {
                     System.out.println("Received remote PAUSE command, but video sending is not active locally.");
+                }
+                break;
+            case "/audio":
+                if (audioManager != null) {
+                    if (!audioManager.isEnabled()) {
+                        System.out.println("Remote peer requested to ENABLE audio.");
+                        audioManager.enableAudio();
+                    } else {
+                        System.out.println("Remote peer requested to DISABLE audio.");
+                        audioManager.disableAudio();
+                    }
+                } else {
+                    System.out.println("Received remote AUDIO command, but audio manager is not initialized.");
                 }
                 break;
             case "/end":
@@ -170,9 +177,6 @@ public class CliCommandThread extends Thread {
         try {
             if (controlSocket != null) {
                 controlSocket.close();
-            }
-            if (controlServerSocket != null) {
-                controlServerSocket.close();
             }
         } catch (IOException e) {
             System.err.println("Error closing control sockets: " + e.getMessage());

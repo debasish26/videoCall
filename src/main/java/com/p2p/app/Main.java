@@ -1,15 +1,13 @@
 package com.p2p.app;
 
 import java.io.IOException;
-import java.net.ServerSocket;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadPoolExecutor;
 
 public class Main {
     private static VideoSendThread videoSendThread;
     private static VideoReceiveThread videoReceiveThread;
-    private static AudioSendThread audioSendThread;
-    private static AudioReceiveThread audioReceiveThread;
+    private static AudioManager audioManager; // New production-ready audio system
     private static ControlReceiveThread controlReceiveThread;
     private static CliCommandThread cliCommandThread;
     private static ThreadPoolExecutor executorService = (ThreadPoolExecutor) Executors.newCachedThreadPool();
@@ -58,28 +56,18 @@ public class Main {
         videoReceiveThread = new VideoReceiveThread(Constants.VIDEO_SERVER_RECEIVE_PORT);
         executorService.submit(videoReceiveThread);
 
-        // Server sends audio to clientIp (on client's receive port)
-        audioSendThread = new AudioSendThread(clientIp, Constants.AUDIO_CLIENT_RECEIVE_PORT);
-        executorService.submit(audioSendThread);
-
-        // Server receives audio from client (on its own receive port)
-        audioReceiveThread = new AudioReceiveThread(Constants.AUDIO_SERVER_RECEIVE_PORT);
-        executorService.submit(audioReceiveThread);
-
-        // Control server socket for CLI commands from client
-        ServerSocket controlServerSocket;
-        try {
-            controlServerSocket = new ServerSocket(Constants.CONTROL_TCP_PORT);
-        } catch (IOException e) {
-            System.err.println("Error creating server control socket: " + e.getMessage());
-            shutdown();
-            return;
+        // Initialize new AudioManager (no weird noises!)
+        audioManager = new AudioManager(clientIp, Constants.AUDIO_CLIENT_RECEIVE_PORT, Constants.AUDIO_SERVER_RECEIVE_PORT);
+        if (!audioManager.initialize()) {
+            System.err.println("Failed to initialize audio system");
         }
 
-        cliCommandThread = new CliCommandThread(videoSendThread, audioSendThread, Main::shutdown, clientIp, controlServerSocket); // Server passes its control server socket
+        // Start CLI which connects to the client's control port (+1)
+        cliCommandThread = new CliCommandThread(videoSendThread, audioManager, Main::shutdown, clientIp, Constants.CONTROL_TCP_PORT + 1);
         executorService.submit(cliCommandThread);
 
-        controlReceiveThread = new ControlReceiveThread(cliCommandThread, Constants.CONTROL_TCP_PORT); // Server listens for control on CONTROL_TCP_PORT
+        // Server listens for incoming control commands on CONTROL_TCP_PORT
+        controlReceiveThread = new ControlReceiveThread(cliCommandThread, Constants.CONTROL_TCP_PORT);
         executorService.submit(controlReceiveThread);
     }
 
@@ -92,19 +80,18 @@ public class Main {
         videoReceiveThread = new VideoReceiveThread(Constants.VIDEO_CLIENT_RECEIVE_PORT);
         executorService.submit(videoReceiveThread);
 
-        // Client sends audio to server (on server's receive port)
-        audioSendThread = new AudioSendThread(serverIp, Constants.AUDIO_SERVER_RECEIVE_PORT);
-        executorService.submit(audioSendThread);
+        // Initialize AudioManager for client
+        audioManager = new AudioManager(serverIp, Constants.AUDIO_SERVER_RECEIVE_PORT, Constants.AUDIO_CLIENT_RECEIVE_PORT);
+        if (!audioManager.initialize()) {
+            System.err.println("Failed to initialize audio system");
+        }
 
-        // Client receives audio from server (on its own receive port)
-        audioReceiveThread = new AudioReceiveThread(Constants.AUDIO_CLIENT_RECEIVE_PORT);
-        executorService.submit(audioReceiveThread);
-
-        cliCommandThread = new CliCommandThread(videoSendThread, audioSendThread, Main::shutdown, serverIp, null); // Client does not create a server socket for control
+        // Start CLI which connects to the server's control port
+        cliCommandThread = new CliCommandThread(videoSendThread, audioManager, Main::shutdown, serverIp, Constants.CONTROL_TCP_PORT);
         executorService.submit(cliCommandThread);
 
         // Client listens on a different port for incoming control commands from server
-        controlReceiveThread = new ControlReceiveThread(cliCommandThread, Constants.CONTROL_TCP_PORT + 1); // Client listens on +1 port for server commands
+        controlReceiveThread = new ControlReceiveThread(cliCommandThread, Constants.CONTROL_TCP_PORT + 1);
         executorService.submit(controlReceiveThread);
     }
 
@@ -117,8 +104,7 @@ public class Main {
         if (cliCommandThread != null) cliCommandThread.stopCli();
         if (videoSendThread != null) videoSendThread.stopCapture();
         if (videoReceiveThread != null) videoReceiveThread.stopReception();
-        if (audioSendThread != null) audioSendThread.stopCapture();
-        if (audioReceiveThread != null) audioReceiveThread.stopReception();
+        if (audioManager != null) audioManager.shutdown();
         if (controlReceiveThread != null) controlReceiveThread.stopReception();
 
         executorService.shutdownNow(); // Immediately shut down all running tasks
